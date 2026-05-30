@@ -1,7 +1,8 @@
 # =============================================================================
 #  Dépendances Python pour le backend FakeGuard / FPD v7
+#  Version optimisée pour l'hébergement Render (slug < 500 Mo)
 # =============================================================================
-#  Installation :
+#  Installation locale :
 #    pip install -r requirements.txt
 # =============================================================================
 
@@ -16,10 +17,11 @@ joblib==1.4.2
 numpy==1.26.4
 scipy==1.13.1
 
-# --- LSTM (TFLite) + tokenizer Keras ---
-# Note : tensorflow est volumineux (~500 Mo). Sur un environnement contraint,
-# vous pouvez basculer sur 'tflite-runtime' (voir README).
-tensorflow==2.16.2
+# --- LSTM (inférence TFLite uniquement) ---
+# tflite-runtime remplace tensorflow (~500 Mo → ~3 Mo).
+# Le tokenizer Keras est désormais réimplémenté en pure Python dans app.py,
+# donc tensorflow N'EST PLUS nécessaire pour le runtime.
+tflite-runtime==2.14.0
 
 # --- Extraction d'URL ---
 requests==2.32.3

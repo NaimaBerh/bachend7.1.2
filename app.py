@@ -256,6 +256,117 @@ _lstm_out = None
 _lstm_error: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------- #
+#  Tokenizer Keras léger (pure Python) — évite la dépendance TensorFlow        #
+# ---------------------------------------------------------------------------- #
+#  Réplique exactement le comportement de tf.keras.preprocessing.text.Tokenizer
+#  pour les opérations dont nous avons besoin (texts_to_sequences) à partir du
+#  JSON exporté par Keras. Permet de remplacer 'tensorflow' (~500 Mo) par
+#  'tflite-runtime' (~3 Mo) — crucial pour l'hébergement Render.
+# ---------------------------------------------------------------------------- #
+
+class _LiteKerasTokenizer:
+    """Implémentation minimale compatible Keras Tokenizer (texts_to_sequences)."""
+
+    def __init__(self, word_index: Dict[str, int], num_words: Optional[int],
+                 filters: str, lower: bool, split: str,
+                 oov_token: Optional[str]) -> None:
+        self.word_index = word_index or {}
+        self.num_words = num_words
+        self.filters = filters or ""
+        self.lower = bool(lower)
+        self.split = split or " "
+        self.oov_token = oov_token
+        # Table de translation pour filtrer les caractères de ponctuation
+        # exactement comme Keras (chaque caractère du filtre est remplacé par un espace)
+        self._translation = str.maketrans(self.filters, self.split * len(self.filters))
+
+    @classmethod
+    def from_json(cls, json_text: str) -> "_LiteKerasTokenizer":
+        data = json.loads(json_text)
+        cfg = data.get("config", data)
+        word_index_raw = cfg.get("word_index")
+        if isinstance(word_index_raw, str):
+            word_index = json.loads(word_index_raw)
+        else:
+            word_index = word_index_raw or {}
+        # Indices peuvent être stockés en string -> int
+        word_index = {str(k): int(v) for k, v in word_index.items()}
+        return cls(
+            word_index=word_index,
+            num_words=cfg.get("num_words"),
+            filters=cfg.get("filters",
+                            '!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n'),
+            lower=cfg.get("lower", True),
+            split=cfg.get("split", " "),
+            oov_token=cfg.get("oov_token"),
+        )
+
+    def _text_to_words(self, text: str) -> List[str]:
+        if self.lower:
+            text = text.lower()
+        text = text.translate(self._translation)
+        return [w for w in text.split(self.split) if w]
+
+    def texts_to_sequences(self, texts: List[str]) -> List[List[int]]:
+        oov_idx = self.word_index.get(self.oov_token) if self.oov_token else None
+        sequences: List[List[int]] = []
+        for text in texts:
+            seq: List[int] = []
+            for word in self._text_to_words(text):
+                idx = self.word_index.get(word)
+                if idx is not None:
+                    if self.num_words is None or idx < self.num_words:
+                        seq.append(idx)
+                    elif oov_idx is not None:
+                        seq.append(oov_idx)
+                elif oov_idx is not None:
+                    seq.append(oov_idx)
+            sequences.append(seq)
+        return sequences
+
+
+def _lite_pad_sequences(sequences: List[List[int]], maxlen: int,
+                       dtype: str = "float32",
+                       padding: str = "pre", truncating: str = "pre",
+                       value: int = 0) -> np.ndarray:
+    """Réplique tf.keras.preprocessing.sequence.pad_sequences (modes 'pre')."""
+    out = np.full((len(sequences), maxlen), value, dtype=dtype)
+    for i, seq in enumerate(sequences):
+        if not seq:
+            continue
+        s = list(seq)
+        if len(s) > maxlen:
+            if truncating == "pre":
+                s = s[-maxlen:]
+            else:
+                s = s[:maxlen]
+        if padding == "pre":
+            out[i, -len(s):] = s
+        else:
+            out[i, :len(s)] = s
+    return out
+
+
+def _load_tflite_interpreter(model_path: str):
+    """
+    Charge un interpréteur TFLite en privilégiant 'tflite-runtime' (léger),
+    avec repli sur 'tensorflow' si présent (compat. dev local).
+    """
+    try:
+        from tflite_runtime.interpreter import Interpreter  # type: ignore
+        return Interpreter(model_path=model_path)
+    except ImportError:
+        try:
+            import tensorflow as tf  # type: ignore
+            return tf.lite.Interpreter(model_path=model_path)
+        except ImportError as exc:
+            raise ImportError(
+                "Ni 'tflite-runtime' ni 'tensorflow' ne sont installés. "
+                "Ajoutez 'tflite-runtime' à requirements.txt."
+            ) from exc
+
+
 def load_lstm() -> None:
     """Charge le modèle TFLite + tokenizer Keras pour l'analyse d'offres."""
     global _lstm_interpreter, _lstm_tokenizer, _lstm_in, _lstm_out, _lstm_error
@@ -267,14 +378,13 @@ def load_lstm() -> None:
         if not os.path.exists(LSTM_TOKENIZER_PATH):
             raise FileNotFoundError(LSTM_TOKENIZER_PATH)
 
-        import tensorflow as tf  # import différé (lourd)
         with open(LSTM_TOKENIZER_PATH, "r", encoding="utf-8") as f:
-            _lstm_tokenizer = tf.keras.preprocessing.text.tokenizer_from_json(f.read())
-        _lstm_interpreter = tf.lite.Interpreter(model_path=LSTM_MODEL_PATH)
+            _lstm_tokenizer = _LiteKerasTokenizer.from_json(f.read())
+        _lstm_interpreter = _load_tflite_interpreter(LSTM_MODEL_PATH)
         _lstm_interpreter.allocate_tensors()
         _lstm_in = _lstm_interpreter.get_input_details()
         _lstm_out = _lstm_interpreter.get_output_details()
-        print("[LSTM] Modèle TFLite + tokenizer chargés.", flush=True)
+        print("[LSTM] Modèle TFLite + tokenizer (lite) chargés.", flush=True)
     except Exception as exc:  # noqa: BLE001
         _lstm_error = f"{type(exc).__name__}: {exc}"
         print(f"[LSTM] Chargement impossible : {_lstm_error}", flush=True)
@@ -2625,10 +2735,9 @@ PUBLIC_EMAIL_DOMAINS = {"gmail.com", "yahoo.com", "outlook.com", "hotmail.com",
 
 
 def _lstm_preprocess(text: str):
-    """Tokenisation + padding pour le LSTM."""
-    from tensorflow.keras.preprocessing.sequence import pad_sequences  # import différé
+    """Tokenisation + padding pour le LSTM (implémentation pure Python)."""
     seq = _lstm_tokenizer.texts_to_sequences([text])
-    return pad_sequences(seq, maxlen=LSTM_MAX_SEQUENCE_LEN, dtype="float32")
+    return _lite_pad_sequences(seq, maxlen=LSTM_MAX_SEQUENCE_LEN, dtype="float32")
 
 
 def analyze_job_signals(text: str) -> Dict[str, Any]:

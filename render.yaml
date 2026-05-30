@@ -1,0 +1,43 @@
+# =============================================================================
+#  Render Blueprint pour le backend FakeGuard / FPD v7
+#  Documentation : https://render.com/docs/blueprint-spec
+# =============================================================================
+#  Utilisation :
+#    1. Pousser ce projet sur GitHub / GitLab.
+#    2. Sur Render → "New +" → "Blueprint" → sélectionner le dépôt.
+#    3. Render lit ce fichier et provisionne automatiquement le service.
+# =============================================================================
+
+services:
+  - type: web
+    name: fpd-backend
+    runtime: python
+    plan: free                # passer à "starter" ou "standard" si free trop juste
+    region: frankfurt         # ou: oregon, virginia, singapore, ohio
+    branch: main              # adapter si votre branche par défaut diffère
+    autoDeploy: true
+
+    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
+
+    # 1 worker / 4 threads : suffisant pour un free tier 512 Mo.
+    # --preload : charge l'app (et les modèles ML) AVANT le fork → mémoire partagée.
+    # --timeout 120 : extractions Instagram/LinkedIn peuvent être lentes.
+    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 --preload --log-file -"
+
+    healthCheckPath: /health
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: ALLOWED_ORIGINS
+        value: "*"           # restreindre aux domaines du front en production
+      - key: LSTM_THRESHOLD
+        value: "0.5"
+      - key: HTTP_TIMEOUT
+        value: "15"
+      - key: GITHUB_TOKEN
+        sync: false           # à renseigner manuellement dans le dashboard Render
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: TF_CPP_MIN_LOG_LEVEL
+        value: "3"
