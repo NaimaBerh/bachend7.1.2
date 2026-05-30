@@ -1,0 +1,27 @@
+# =============================================================================
+#  Dépendances Python pour le backend FakeGuard / FPD v7
+# =============================================================================
+#  Installation :
+#    pip install -r requirements.txt
+# =============================================================================
+
+# --- Web framework ---
+Flask==3.0.3
+flask-cors==4.0.1
+gunicorn==22.0.0
+
+# --- ML : Random Forest + TF-IDF + scaler ---
+scikit-learn==1.5.2
+joblib==1.4.2
+numpy==1.26.4
+scipy==1.13.1
+
+# --- LSTM (TFLite) + tokenizer Keras ---
+# Note : tensorflow est volumineux (~500 Mo). Sur un environnement contraint,
+# vous pouvez basculer sur 'tflite-runtime' (voir README).
+tensorflow==2.16.2
+
+# --- Extraction d'URL ---
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.2.2
